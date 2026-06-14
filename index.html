@@ -91,6 +91,11 @@
       background: #5a67d8;
     }
 
+    .input-row button:disabled {
+      background: #a0aec0;
+      cursor: not-allowed;
+    }
+
     .filters {
       display: flex;
       gap: 8px;
@@ -215,6 +220,23 @@
     .clear-btn:hover {
       text-decoration: underline;
     }
+
+    .loading {
+      text-align: center;
+      color: #a0aec0;
+      font-size: 0.9rem;
+      padding: 32px 0;
+    }
+
+    .error-msg {
+      text-align: center;
+      color: #e53e3e;
+      font-size: 0.85rem;
+      padding: 12px;
+      background: #fff5f5;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
   </style>
 </head>
 <body>
@@ -222,10 +244,12 @@
     <h1>🛒 쇼핑 리스트</h1>
     <p class="subtitle" id="date-label"></p>
 
+    <div id="error-area"></div>
+
     <div class="input-row">
       <label for="item-input" class="visually-hidden">쇼핑 아이템 입력</label>
       <input type="text" id="item-input" placeholder="아이템을 입력하세요..." maxlength="60">
-      <button type="button" onclick="addItem()" aria-label="아이템 추가">+</button>
+      <button type="button" id="add-btn" onclick="addItem()" aria-label="아이템 추가">+</button>
     </div>
 
     <div class="filters" role="group" aria-label="목록 필터">
@@ -242,72 +266,109 @@
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
-    function storageAvailable() {
-      try {
-        const x = '__storage_test__';
-        localStorage.setItem(x, x);
-        localStorage.removeItem(x);
-        return true;
-      } catch (e) {
-        return e instanceof DOMException &&
-          e.name === 'QuotaExceededError' &&
-          localStorage.length !== 0;
-      }
-    }
+    const SUPABASE_URL = 'https://webpvmshyrwaleowjbjn.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndlYnB2bXNoeXJ3YWxlb3dqYmpuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0MjMzNzMsImV4cCI6MjA5Njk5OTM3M30.ZzXkSG4J9MKNegXjgjHCFOY9pLFXZKNpgz0o75GIOfg';
 
-    const hasStorage = storageAvailable();
+    const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    function loadItems() {
-      if (!hasStorage) return [];
-      try {
-        return JSON.parse(localStorage.getItem('shopping-items') || '[]');
-      } catch {
-        return [];
-      }
-    }
-
-    let items = loadItems();
+    let items = [];
     let filter = 'all';
 
-    function save() {
-      if (!hasStorage) return;
-      try {
-        localStorage.setItem('shopping-items', JSON.stringify(items));
-      } catch (e) {
-        if (e instanceof DOMException && e.name === 'QuotaExceededError') {
-          alert('저장 공간이 가득 찼습니다. 완료된 항목을 삭제해 주세요.');
-        }
-      }
+    function showError(msg) {
+      const area = document.getElementById('error-area');
+      area.innerHTML = `<div class="error-msg">${escapeHtml(msg)}</div>`;
+      setTimeout(() => { area.innerHTML = ''; }, 4000);
     }
 
-    function addItem() {
+    async function loadItems() {
+      document.getElementById('list').innerHTML = '<li class="loading">불러오는 중...</li>';
+      const { data, error } = await db
+        .from('shopping_items')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        showError('데이터를 불러오지 못했습니다: ' + error.message);
+        return [];
+      }
+      return data || [];
+    }
+
+    async function addItem() {
       const input = document.getElementById('item-input');
+      const btn = document.getElementById('add-btn');
       const text = input.value.trim();
       if (!text) return;
-      items.unshift({ id: crypto.randomUUID(), text, checked: false });
-      save();
+
+      btn.disabled = true;
+      const { data, error } = await db
+        .from('shopping_items')
+        .insert([{ text, checked: false }])
+        .select()
+        .single();
+      btn.disabled = false;
+
+      if (error) {
+        showError('추가에 실패했습니다: ' + error.message);
+        return;
+      }
+
+      items.unshift(data);
       render();
       input.value = '';
       input.focus();
     }
 
-    function toggleItem(id) {
+    async function toggleItem(id) {
       const item = items.find(i => i.id === id);
-      if (item) item.checked = !item.checked;
-      save();
+      if (!item) return;
+
+      const { error } = await db
+        .from('shopping_items')
+        .update({ checked: !item.checked })
+        .eq('id', id);
+
+      if (error) {
+        showError('변경에 실패했습니다: ' + error.message);
+        return;
+      }
+
+      item.checked = !item.checked;
       render();
     }
 
-    function deleteItem(id) {
+    async function deleteItem(id) {
+      const { error } = await db
+        .from('shopping_items')
+        .delete()
+        .eq('id', id);
+
+      if (error) {
+        showError('삭제에 실패했습니다: ' + error.message);
+        return;
+      }
+
       items = items.filter(i => i.id !== id);
-      save();
       render();
     }
 
-    function clearDone() {
+    async function clearDone() {
+      const doneIds = items.filter(i => i.checked).map(i => i.id);
+      if (doneIds.length === 0) return;
+
+      const { error } = await db
+        .from('shopping_items')
+        .delete()
+        .in('id', doneIds);
+
+      if (error) {
+        showError('삭제에 실패했습니다: ' + error.message);
+        return;
+      }
+
       items = items.filter(i => !i.checked);
-      save();
       render();
     }
 
@@ -359,7 +420,11 @@
     document.getElementById('date-label').textContent =
       now.toLocaleDateString('ko-KR', { year:'numeric', month:'long', day:'numeric', weekday:'long' });
 
-    render();
+    async function init() {
+      items = await loadItems();
+      render();
+    }
+    init();
   </script>
 </body>
 </html>
